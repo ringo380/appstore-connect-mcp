@@ -42,6 +42,18 @@ export class AppStoreClient {
   }
 
   /**
+   * Make a POST request to the App Store Connect API
+   */
+  async post<T = any>(endpoint: string, body: any): Promise<T> {
+    await this.checkRateLimit();
+    const response = await this.axiosInstance.post<T>(endpoint, body, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    this.requestCount++;
+    return response.data;
+  }
+
+  /**
    * Make a GET request to the App Store Connect API
    */
   async request<T = any>(endpoint: string, params?: any, options?: AxiosRequestConfig): Promise<T> {

@@ -1,32 +1,22 @@
 import { AppStoreClient } from '../api/client.js';
-import { gunzipSync } from 'zlib';
+import { decompressIfNeeded, parseCSVReport } from '../utils/report-utils.js';
 
-/**
- * Dedicated service for handling App Store subscription metrics
- * Focuses on renewal tracking and subscription-specific analytics
- */
 export class SubscriptionService {
   constructor(
     private client: AppStoreClient,
     private vendorNumber?: string
   ) {}
 
-  /**
-   * Get subscription renewal metrics
-   * Attempts to access renewal data through various report types
-   */
   async getSubscriptionRenewals(date?: string): Promise<any> {
     if (!this.vendorNumber) {
       throw new Error('Vendor number required for subscription reports');
     }
 
     const targetDate = date || this.getYesterdayDate();
-    
-    // Try multiple approaches to get renewal data
+
     const results = {
       date: targetDate,
       renewalData: null as any,
-      newSubscriptions: null as any,
       salesData: null as any,
       totalRenewals: 0,
       totalNewSubscriptions: 0,
@@ -34,7 +24,7 @@ export class SubscriptionService {
       dataSource: 'none'
     };
 
-    // 1. Try SUBSCRIPTION report with different parameters
+    // Try subscription report types in order
     const subscriptionParams = [
       { reportType: 'SUBSCRIPTION', reportSubType: 'SUMMARY', version: '1_2' },
       { reportType: 'SUBSCRIPTION', reportSubType: 'DETAILED', version: '1_2' },
@@ -44,65 +34,49 @@ export class SubscriptionService {
 
     for (const params of subscriptionParams) {
       try {
-        const fullParams: any = {
+        const response = await this.client.request('/salesReports', {
           'filter[vendorNumber]': this.vendorNumber,
           'filter[reportType]': params.reportType,
           'filter[reportSubType]': params.reportSubType,
           'filter[frequency]': 'DAILY',
           'filter[reportDate]': targetDate,
           'filter[version]': params.version
-        };
-
-        const response = await this.client.request('/salesReports', fullParams);
-        const decompressed = this.decompressIfNeeded(response);
-        const parsed = this.parseCSVReport(decompressed, params.reportType);
-        
-        if (parsed.rows && parsed.rows.length > 0) {
+        });
+        const parsed = parseCSVReport(decompressIfNeeded(response), params.reportType);
+        if (parsed.rows.length > 0) {
           results.renewalData = this.analyzeSubscriptionData(parsed);
           results.dataSource = params.reportType;
           break;
         }
-      } catch (error) {
-        // Continue to next attempt
+      } catch {
+        // Continue to next type
       }
     }
 
-    // 2. Analyze SALES data for subscription patterns
+    // Also try SALES data for subscription patterns
     try {
-      const salesParams = {
+      const salesResponse = await this.client.request('/salesReports', {
         'filter[vendorNumber]': this.vendorNumber,
         'filter[reportType]': 'SALES',
         'filter[reportSubType]': 'SUMMARY',
         'filter[frequency]': 'DAILY',
         'filter[reportDate]': targetDate,
         'filter[version]': '1_1'
-      };
-
-      const salesResponse = await this.client.request('/salesReports', salesParams);
-      const salesDecompressed = this.decompressIfNeeded(salesResponse);
-      const salesParsed = this.parseCSVReport(salesDecompressed, 'SALES');
-      
-      if (salesParsed.rows && salesParsed.rows.length > 0) {
+      });
+      const salesParsed = parseCSVReport(decompressIfNeeded(salesResponse), 'SALES');
+      if (salesParsed.rows.length > 0) {
         results.salesData = this.extractSubscriptionFromSales(salesParsed);
         results.totalNewSubscriptions = results.salesData.newSubscriptions || 0;
-        
-        if (!results.renewalData) {
-          results.dataSource = 'SALES_INFERRED';
-        }
+        if (!results.renewalData) results.dataSource = 'SALES_INFERRED';
       }
-    } catch (error) {
+    } catch {
       // Sales data not available
     }
 
-    // 3. Calculate estimated MRR
     results.estimatedMRR = this.calculateEstimatedMRR(results);
-
     return results;
   }
 
-  /**
-   * Get comprehensive subscription analytics for a month
-   */
   async getMonthlySubscriptionAnalytics(year: number, month: number): Promise<any> {
     const analytics = {
       year,
@@ -120,72 +94,81 @@ export class SubscriptionService {
       dailyMetrics: [] as any[]
     };
 
-    // Get all days in the month
     const daysInMonth = new Date(year, month, 0).getDate();
-    
-    for (let day = 1; day <= daysInMonth; day++) {
-      const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      
-      try {
-        const dailyData = await this.getSubscriptionRenewals(dateStr);
-        
-        if (dailyData) {
-          analytics.totalNewSubscriptions += dailyData.totalNewSubscriptions || 0;
-          analytics.totalRenewals += dailyData.totalRenewals || 0;
-          
-          if (dailyData.salesData) {
-            analytics.subscriptionRevenue += dailyData.salesData.subscriptionRevenue || 0;
-            analytics.oneTimeRevenue += dailyData.salesData.oneTimeRevenue || 0;
-            
-            // Track subscription types
-            if (dailyData.salesData.subscriptionTypes) {
-              for (const [type, count] of Object.entries(dailyData.salesData.subscriptionTypes)) {
-                const current = analytics.subscriptionTypes.get(type) || 0;
-                analytics.subscriptionTypes.set(type, current + (count as number));
-              }
-            }
-            
-            // Track geographic distribution
-            if (dailyData.salesData.countries) {
-              for (const [country, revenue] of Object.entries(dailyData.salesData.countries)) {
-                const current = analytics.geographicDistribution.get(country) || 0;
-                analytics.geographicDistribution.set(country, current + (revenue as number));
-              }
-            }
-          }
-          
-          analytics.dailyMetrics.push({
-            date: dateStr,
-            newSubscriptions: dailyData.totalNewSubscriptions,
-            renewals: dailyData.totalRenewals,
-            estimatedMRR: dailyData.estimatedMRR
-          });
-        }
-      } catch (error) {
-        // Continue with next day
+    const dates = Array.from({ length: daysInMonth }, (_, i) => {
+      const day = i + 1;
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    });
+
+    // Fetch all days concurrently in batches of 10
+    const BATCH_SIZE = 10;
+    const allResults: Array<any> = [];
+
+    for (let i = 0; i < dates.length; i += BATCH_SIZE) {
+      const batch = dates.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map(dateStr => this.getSubscriptionRenewals(dateStr))
+      );
+      for (let j = 0; j < batchResults.length; j++) {
+        const r = batchResults[j];
+        allResults.push(r.status === 'fulfilled' ? { dateStr: batch[j], data: r.value } : null);
+      }
+      if (i + BATCH_SIZE < dates.length) {
+        await new Promise(r => setTimeout(r, 200));
       }
     }
 
-    // Calculate derived metrics
-    analytics.netSubscriberGrowth = analytics.totalNewSubscriptions - analytics.totalChurn;
-    
-    if (analytics.totalNewSubscriptions > 0) {
-      analytics.averageSubscriptionValue = 
-        analytics.subscriptionRevenue / analytics.totalNewSubscriptions;
+    for (const item of allResults) {
+      if (!item) continue;
+      const { dateStr, data } = item;
+      if (!data) continue;
+
+      analytics.totalNewSubscriptions += data.totalNewSubscriptions || 0;
+      analytics.totalRenewals += data.totalRenewals || 0;
+
+      if (data.salesData) {
+        analytics.subscriptionRevenue += data.salesData.subscriptionRevenue || 0;
+        analytics.oneTimeRevenue += data.salesData.oneTimeRevenue || 0;
+
+        if (data.salesData.subscriptionTypes) {
+          for (const [type, count] of Object.entries(data.salesData.subscriptionTypes)) {
+            analytics.subscriptionTypes.set(type, (analytics.subscriptionTypes.get(type) || 0) + (count as number));
+          }
+        }
+
+        if (data.salesData.countries) {
+          for (const [country, revenue] of Object.entries(data.salesData.countries)) {
+            analytics.geographicDistribution.set(country, (analytics.geographicDistribution.get(country) || 0) + (revenue as number));
+          }
+        }
+      }
+
+      analytics.dailyMetrics.push({
+        date: dateStr,
+        newSubscriptions: data.totalNewSubscriptions,
+        renewals: data.totalRenewals,
+        estimatedMRR: data.estimatedMRR
+      });
     }
 
-    // Convert maps to sorted arrays
+    analytics.netSubscriberGrowth = analytics.totalNewSubscriptions - analytics.totalChurn;
+    if (analytics.totalNewSubscriptions > 0) {
+      analytics.averageSubscriptionValue = analytics.subscriptionRevenue / analytics.totalNewSubscriptions;
+    }
+
     const sortedTypes = Array.from(analytics.subscriptionTypes.entries())
       .sort((a, b) => b[1] - a[1])
       .map(([type, count]) => ({ type, count }));
-    
+
     const sortedCountries = Array.from(analytics.geographicDistribution.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 10)
-      .map(([country, revenue]) => ({ 
-        country, 
+      .map(([country, revenue]) => ({
+        country,
         revenue,
-        percentage: (revenue / analytics.subscriptionRevenue * 100).toFixed(1)
+        percentage: analytics.subscriptionRevenue > 0
+          ? (revenue / analytics.subscriptionRevenue * 100).toFixed(1)
+          : '0.0'
       }));
 
     return {
@@ -194,17 +177,15 @@ export class SubscriptionService {
       topCountries: sortedCountries,
       summary: {
         totalRevenue: analytics.subscriptionRevenue + analytics.oneTimeRevenue,
-        subscriptionPercentage: 
-          ((analytics.subscriptionRevenue / (analytics.subscriptionRevenue + analytics.oneTimeRevenue)) * 100).toFixed(1),
+        subscriptionPercentage: analytics.subscriptionRevenue + analytics.oneTimeRevenue > 0
+          ? ((analytics.subscriptionRevenue / (analytics.subscriptionRevenue + analytics.oneTimeRevenue)) * 100).toFixed(1)
+          : '0.0',
         estimatedActiveSubscribers: analytics.totalNewSubscriptions + analytics.totalRenewals - analytics.totalChurn,
         averageSubscriptionValue: analytics.averageSubscriptionValue.toFixed(2)
       }
     };
   }
 
-  /**
-   * Analyze subscription data from parsed report
-   */
   private analyzeSubscriptionData(parsedData: any): any {
     const analysis = {
       totalSubscribers: 0,
@@ -218,7 +199,6 @@ export class SubscriptionService {
     };
 
     for (const row of parsedData.rows) {
-      // Common subscription fields across different report types
       const active = parseInt(row['Active Standard Price Subscriptions'] || '0', 10);
       const newSubs = parseInt(row['New Standard Price Subscriptions'] || '0', 10);
       const canceled = parseInt(row['Canceled Subscriptions'] || '0', 10);
@@ -232,28 +212,20 @@ export class SubscriptionService {
       analysis.revenue += revenue;
 
       if (product !== 'Unknown') {
-        const current = analysis.subscriptionsByProduct.get(product) || 0;
-        analysis.subscriptionsByProduct.set(product, current + active);
+        analysis.subscriptionsByProduct.set(product, (analysis.subscriptionsByProduct.get(product) || 0) + active);
       }
-
       if (country !== 'Unknown') {
-        const current = analysis.subscriptionsByCountry.get(country) || 0;
-        analysis.subscriptionsByCountry.set(country, current + active);
+        analysis.subscriptionsByCountry.set(country, (analysis.subscriptionsByCountry.get(country) || 0) + active);
       }
     }
 
     analysis.totalSubscribers = analysis.activeSubscribers;
-    
     if (analysis.activeSubscribers > 0) {
       analysis.averagePrice = analysis.revenue / analysis.activeSubscribers;
     }
-
     return analysis;
   }
 
-  /**
-   * Extract subscription information from SALES report
-   */
   private extractSubscriptionFromSales(parsedData: any): any {
     const extracted = {
       subscriptionRevenue: 0,
@@ -272,8 +244,7 @@ export class SubscriptionService {
       const country = row['Country Code'] || 'Unknown';
       const sku = row['SKU'] || '';
 
-      // Identify subscription products
-      const isSubscription = 
+      const isSubscription =
         productType.includes('Auto-Renewable') ||
         productType.includes('Subscription') ||
         product.toLowerCase().includes('subscription') ||
@@ -284,136 +255,34 @@ export class SubscriptionService {
       if (isSubscription) {
         extracted.subscriptionRevenue += revenue;
         extracted.newSubscriptions += units;
-        
-        if (!extracted.subscriptionTypes[productType]) {
-          extracted.subscriptionTypes[productType] = 0;
-        }
-        extracted.subscriptionTypes[productType] += units;
+        extracted.subscriptionTypes[productType] = (extracted.subscriptionTypes[productType] || 0) + units;
       } else {
         extracted.oneTimeRevenue += revenue;
       }
 
-      // Track by country
-      if (!extracted.countries[country]) {
-        extracted.countries[country] = 0;
-      }
-      extracted.countries[country] += revenue;
+      extracted.countries[country] = (extracted.countries[country] || 0) + revenue;
 
-      // Track products
       if (isSubscription && units > 0) {
-        extracted.products.push({
-          sku,
-          product,
-          units,
-          revenue,
-          averagePrice: revenue / units
-        });
+        extracted.products.push({ sku, product, units, revenue, averagePrice: revenue / units });
       }
     }
 
-    // Sort products by revenue
     extracted.products.sort((a, b) => b.revenue - a.revenue);
-
     return extracted;
   }
 
-  /**
-   * Calculate estimated MRR from available data
-   */
   private calculateEstimatedMRR(data: any): number {
-    let estimatedMRR = 0;
-
-    // If we have renewal data, use it
-    if (data.renewalData && data.renewalData.activeSubscribers > 0) {
-      estimatedMRR = data.renewalData.activeSubscribers * data.renewalData.averagePrice;
-    } 
-    // Otherwise, estimate from sales data
-    else if (data.salesData) {
-      // Assume new subscriptions represent about 10% of total active base
-      // This is a rough estimate when renewal data is not available
+    if (data.renewalData?.activeSubscribers > 0) {
+      return data.renewalData.activeSubscribers * data.renewalData.averagePrice;
+    }
+    if (data.salesData?.newSubscriptions > 0) {
       const estimatedActiveBase = data.salesData.newSubscriptions * 10;
       const averagePrice = data.salesData.subscriptionRevenue / data.salesData.newSubscriptions;
-      estimatedMRR = estimatedActiveBase * averagePrice;
+      return estimatedActiveBase * averagePrice;
     }
-
-    return estimatedMRR;
+    return 0;
   }
 
-  /**
-   * Detect if response is gzipped and decompress if needed
-   */
-  private decompressIfNeeded(data: any): string {
-    if (Buffer.isBuffer(data)) {
-      if (data.length > 2 && data[0] === 0x1f && data[1] === 0x8b) {
-        try {
-          const decompressed = gunzipSync(data);
-          return decompressed.toString('utf-8');
-        } catch (error) {
-          return data.toString('utf-8');
-        }
-      }
-      return data.toString('utf-8');
-    }
-    
-    if (typeof data === 'string') {
-      if (data.length > 2 && data.charCodeAt(0) === 0x1f && data.charCodeAt(1) === 0x8b) {
-        try {
-          const buffer = Buffer.from(data, 'binary');
-          const decompressed = gunzipSync(buffer);
-          return decompressed.toString('utf-8');
-        } catch (error) {
-          return data;
-        }
-      }
-    }
-    
-    return JSON.stringify(data);
-  }
-
-  /**
-   * Parse CSV report data
-   */
-  private parseCSVReport(csvData: string, reportType: string): any {
-    if (!csvData || csvData.length === 0) {
-      return { rows: [], summary: 'No data available' };
-    }
-
-    const lines = csvData.split('\n').filter(line => line.trim());
-    
-    if (lines.length === 0) {
-      return { rows: [], summary: 'Empty report' };
-    }
-
-    const headers = lines[0].split('\t').map(h => h.trim());
-    const rows = [];
-    
-    for (let i = 1; i < lines.length; i++) {
-      const values = lines[i].split('\t');
-      const row: any = {};
-      
-      headers.forEach((header, index) => {
-        row[header] = values[index] ? values[index].trim() : '';
-      });
-      
-      // Add USD proceeds (already converted by Apple)
-      const proceedsUSD = parseFloat(row['Developer Proceeds'] || row['Proceeds'] || '0');
-      row._proceedsUSD = proceedsUSD;
-      
-      rows.push(row);
-    }
-    
-    return {
-      reportType,
-      headers,
-      rows,
-      rowCount: rows.length,
-      summary: `Parsed ${rows.length} rows from ${reportType} report`
-    };
-  }
-
-  /**
-   * Get yesterday's date in YYYY-MM-DD format
-   */
   private getYesterdayDate(): string {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);

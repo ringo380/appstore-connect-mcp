@@ -208,49 +208,47 @@ export class FinanceReportService {
     let returnsRevenue = 0;
     let hasData = false;
     
-    // Fetch and aggregate all regions
-    for (const { code, name } of regions) {
-      try {
-        const report = await this.getFinancialReport({
-          fiscalPeriod,
-          regionCode: code
-        });
-        
-        if (report.totalRevenue > 0) {
-          hasData = true;
-          totalRevenue += report.totalRevenue;
-          byRegion.set(name, report.totalRevenue);
-          
-          // Aggregate product data
-          report.rows.forEach(row => {
-            const productIdx = report.headers.findIndex(h => 
-              h === 'Vendor Identifier' || h === 'SKU'
-            );
-            const salesReturnIdx = report.headers.findIndex(h =>
-              h === 'Sales or Return'
-            );
-            
-            if (productIdx >= 0) {
-              const product = row[report.headers[productIdx]] || 'Unknown';
-              const revenue = row._revenue || 0;
-              byProduct.set(product, (byProduct.get(product) || 0) + revenue);
-              
-              if (salesReturnIdx >= 0) {
-                const salesOrReturn = row[report.headers[salesReturnIdx]];
-                if (salesOrReturn === 'S') {
-                  salesRevenue += revenue;
-                } else if (salesOrReturn === 'R') {
-                  returnsRevenue += Math.abs(revenue);
-                }
+    // Fetch all regions concurrently
+    const regionResults = await Promise.allSettled(
+      regions.map(({ code, name }) =>
+        this.getFinancialReport({ fiscalPeriod, regionCode: code })
+          .then(report => ({ name, report }))
+      )
+    );
+
+    for (const result of regionResults) {
+      if (result.status === 'rejected') {
+        const err = result.reason as Error;
+        if (!err.message.includes('404')) {
+          process.stderr.write(`Error fetching finance region data: ${err.message}\n`);
+        }
+        continue;
+      }
+      const { name, report } = result.value;
+      if (report.totalRevenue > 0) {
+        hasData = true;
+        totalRevenue += report.totalRevenue;
+        byRegion.set(name, report.totalRevenue);
+
+        const productIdx = report.headers.findIndex(h => h === 'Vendor Identifier' || h === 'SKU');
+        const salesReturnIdx = report.headers.findIndex(h => h === 'Sales or Return');
+
+        report.rows.forEach(row => {
+          if (productIdx >= 0) {
+            const product = row[report.headers[productIdx]] || 'Unknown';
+            const revenue = row._revenue || 0;
+            byProduct.set(product, (byProduct.get(product) || 0) + revenue);
+
+            if (salesReturnIdx >= 0) {
+              const salesOrReturn = row[report.headers[salesReturnIdx]];
+              if (salesOrReturn === 'S') {
+                salesRevenue += revenue;
+              } else if (salesOrReturn === 'R') {
+                returnsRevenue += Math.abs(revenue);
               }
             }
-          });
-        }
-      } catch (error: any) {
-        // 404 is expected for regions without data
-        if (!error.message.includes('404')) {
-          console.error(`Error fetching ${name} data:`, error.message);
-        }
+          }
+        });
       }
     }
     

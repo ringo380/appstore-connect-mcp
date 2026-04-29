@@ -139,9 +139,8 @@ export class BetaService {
         topCrashes: [], // Would need crash reporting API
         feedback: [] // Would need feedback API
       };
-    } catch (error) {
-      // Return mock data if API fails
-      return this.getMockTestFlightMetrics(appId);
+    } catch (error: any) {
+      throw new Error(`Failed to fetch TestFlight metrics: ${error.message}`);
     }
   }
 
@@ -223,51 +222,6 @@ export class BetaService {
       minOsVersion: build.attributes?.minOsVersion,
       usesNonExemptEncryption: build.attributes?.usesNonExemptEncryption
     }));
-  }
-
-  /**
-   * Get mock TestFlight metrics
-   */
-  private getMockTestFlightMetrics(appId?: string): TestFlightMetrics {
-    return {
-      totalTesters: 150,
-      activeTesters: 120,
-      pendingInvitations: 30,
-      groups: [
-        {
-          id: '1',
-          name: 'Internal Testers',
-          isPublicLink: false,
-          publicLinkEnabled: false,
-          testerCount: 25,
-          createdDate: new Date().toISOString(),
-          appId: appId || 'unknown'
-        },
-        {
-          id: '2',
-          name: 'Beta Users',
-          isPublicLink: true,
-          publicLinkEnabled: true,
-          publicLink: 'https://testflight.apple.com/join/abc123',
-          testerCount: 125,
-          createdDate: new Date().toISOString(),
-          appId: appId || 'unknown'
-        }
-      ],
-      recentBuilds: [
-        {
-          id: '1',
-          version: '1.2.0',
-          buildNumber: '145',
-          uploadedDate: new Date().toISOString(),
-          processingState: 'VALID',
-          expirationDate: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
-          minOsVersion: '15.0'
-        }
-      ],
-      topCrashes: [],
-      feedback: []
-    };
   }
 
   /**

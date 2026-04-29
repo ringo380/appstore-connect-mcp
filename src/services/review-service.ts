@@ -55,21 +55,12 @@ export class ReviewService {
       return [];
     } catch (error) {
       // Try alternative endpoint
-      try {
-        const response = await this.client.request('/customerReviews', {
-          'filter[app]': appId,
-          limit,
-          sort: '-createdDate'
-        });
-        
-        if (response.data) {
-          return this.formatCustomerReviews(response.data);
-        }
-      } catch (e) {
-        // Return mock data if API is not available
-        return this.getMockReviews(appId);
-      }
-      
+      const response2 = await this.client.request('/customerReviews', {
+        'filter[app]': appId,
+        limit,
+        sort: '-createdDate'
+      });
+      if (response2.data) return this.formatCustomerReviews(response2.data);
       return [];
     }
   }
@@ -118,14 +109,8 @@ export class ReviewService {
         averageRating: 0,
         totalRatings: 0
       };
-    } catch (error) {
-      // Return mock summary
-      return {
-        averageRating: 4.5,
-        totalRatings: 1250,
-        currentVersionRating: 4.7,
-        currentVersionRatingCount: 450
-      };
+    } catch {
+      return { averageRating: 0, totalRatings: 0 };
     }
   }
 
@@ -133,13 +118,12 @@ export class ReviewService {
    * Get comprehensive review metrics
    */
   async getReviewMetrics(appId: string): Promise<ReviewMetrics> {
-    try {
-      // Fetch data in parallel
-      const [reviews, responses, summary] = await Promise.all([
-        this.getCustomerReviews(appId, 200),
-        this.getReviewResponses(appId),
-        this.getRatingSummary(appId)
-      ]);
+    // Fetch data in parallel
+    const [reviews, responses, summary] = await Promise.all([
+      this.getCustomerReviews(appId, 200),
+      this.getReviewResponses(appId),
+      this.getRatingSummary(appId)
+    ]);
 
       // Calculate rating distribution
       const distribution = {
@@ -190,10 +174,6 @@ export class ReviewService {
         topCriticalReviews: criticalReviews,
         responseRate: Math.round(responseRate)
       };
-    } catch (error) {
-      // Return mock metrics
-      return this.getMockReviewMetrics();
-    }
   }
 
   /**
@@ -293,65 +273,6 @@ export class ReviewService {
     
     const sum = reviews.reduce((acc, review) => acc + review.rating, 0);
     return Math.round((sum / reviews.length) * 10) / 10;
-  }
-
-  /**
-   * Get mock reviews for testing
-   */
-  private getMockReviews(appId: string): CustomerReview[] {
-    return [
-      {
-        id: '1',
-        rating: 5,
-        title: 'Amazing app!',
-        body: 'This app has completely transformed my workflow. The design tools are intuitive and powerful.',
-        reviewerNickname: 'DesignPro',
-        createdDate: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-        territory: 'US',
-        appVersionString: '3.2.0'
-      },
-      {
-        id: '2',
-        rating: 4,
-        title: 'Great but needs improvement',
-        body: 'Love the features but occasionally crashes on iPad. Overall still very useful.',
-        reviewerNickname: 'CreativeUser',
-        createdDate: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
-        territory: 'GB',
-        appVersionString: '3.2.0'
-      },
-      {
-        id: '3',
-        rating: 2,
-        title: 'Too expensive',
-        body: 'The subscription price is too high for individual users. Need more affordable options.',
-        reviewerNickname: 'BudgetUser',
-        createdDate: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
-        territory: 'CA',
-        appVersionString: '3.1.0'
-      }
-    ];
-  }
-
-  /**
-   * Get mock review metrics
-   */
-  private getMockReviewMetrics(): ReviewMetrics {
-    return {
-      averageRating: 4.3,
-      totalRatings: 1250,
-      ratingDistribution: {
-        oneStar: 50,
-        twoStar: 75,
-        threeStar: 150,
-        fourStar: 425,
-        fiveStar: 550
-      },
-      recentReviews: this.getMockReviews('mock'),
-      topPositiveReviews: this.getMockReviews('mock').filter(r => r.rating >= 4),
-      topCriticalReviews: this.getMockReviews('mock').filter(r => r.rating <= 2),
-      responseRate: 65
-    };
   }
 
   /**

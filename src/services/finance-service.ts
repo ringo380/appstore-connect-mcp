@@ -479,68 +479,56 @@ export class FinanceService {
       highRevenueDays: [] as any[]
     };
 
-    // Get all days in the month
+    // Build date list for all days in the month
     const daysInMonth = new Date(year, month, 0).getDate();
-    const dates = [];
-    
-    for (let day = 1; day <= daysInMonth; day++) {
-      const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      dates.push(dateStr);
+    const dates = Array.from({ length: daysInMonth }, (_, i) => {
+      const day = i + 1;
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    });
+
+    // Fetch all days concurrently in batches of 10 to respect rate limits
+    const BATCH_SIZE = 10;
+    const dayResults: Array<{ dateStr: string; report: any } | null> = [];
+
+    for (let i = 0; i < dates.length; i += BATCH_SIZE) {
+      const batch = dates.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map(async (dateStr) => {
+          const report = await this.getSalesReport({ reportType: 'SALES', dateType: 'DAILY', date: dateStr });
+          return { dateStr, report };
+        })
+      );
+      for (const result of batchResults) {
+        dayResults.push(result.status === 'fulfilled' ? result.value : null);
+      }
+      // Small pause between batches to avoid bursting the rate limit
+      if (i + BATCH_SIZE < dates.length) {
+        await new Promise(r => setTimeout(r, 200));
+      }
     }
 
-    // Process each day
-    for (const dateStr of dates) {
-      try {
-        const report = await this.getSalesReport({
-          reportType: 'SALES',
-          dateType: 'DAILY',
-          date: dateStr
+    // Aggregate results
+    for (const item of dayResults) {
+      if (!item) continue;
+      const { dateStr, report } = item;
+      if (report.rows && report.rows.length > 0) {
+        monthlyData.daysWithData++;
+        monthlyData.totalTransactions += report.rows.length;
+        let dailyTotal = 0;
+        report.rows.forEach((row: any) => {
+          const revenue = row._proceedsUSD || 0;
+          const country = row['Country Code'] || 'Unknown';
+          const product = row['Title'] || row['Product Title'] || 'Unknown';
+          const currency = row['Customer Currency'] || 'USD';
+          dailyTotal += revenue;
+          monthlyData.countryBreakdown.set(country, (monthlyData.countryBreakdown.get(country) || 0) + revenue);
+          monthlyData.productBreakdown.set(product, (monthlyData.productBreakdown.get(product) || 0) + revenue);
+          monthlyData.currencyBreakdown.set(currency, (monthlyData.currencyBreakdown.get(currency) || 0) + revenue);
         });
-        
-        if (report.rows && report.rows.length > 0) {
-          monthlyData.daysWithData++;
-          monthlyData.totalTransactions += report.rows.length;
-          
-          let dailyTotal = 0;
-          
-          report.rows.forEach((row: any) => {
-            // Use pre-converted USD value
-            const revenue = row._proceedsUSD || 0;
-            const country = row['Country Code'] || 'Unknown';
-            const product = row['Title'] || row['Product Title'] || 'Unknown';
-            const currency = row['Customer Currency'] || 'USD';
-            
-            dailyTotal += revenue;
-            
-            // Track by country
-            const currentCountry = monthlyData.countryBreakdown.get(country) || 0;
-            monthlyData.countryBreakdown.set(country, currentCountry + revenue);
-            
-            // Track by product
-            const currentProduct = monthlyData.productBreakdown.get(product) || 0;
-            monthlyData.productBreakdown.set(product, currentProduct + revenue);
-            
-            // Track by currency
-            const currentCurrency = monthlyData.currencyBreakdown.get(currency) || 0;
-            monthlyData.currencyBreakdown.set(currency, currentCurrency + revenue);
-          });
-          
-          monthlyData.totalRevenue += dailyTotal;
-          monthlyData.dailyRevenues.push(dailyTotal);
-          
-          // Track high revenue days (>$10K)
-          if (dailyTotal > 10000) {
-            monthlyData.highRevenueDays.push({
-              date: dateStr,
-              revenue: dailyTotal,
-              transactions: report.rows.length
-            });
-          }
-        }
-      } catch (error: any) {
-        // 404 is expected for days with no data
-        if (!error.message.includes('404')) {
-          console.error(`Error fetching data for ${dateStr}:`, error.message);
+        monthlyData.totalRevenue += dailyTotal;
+        monthlyData.dailyRevenues.push(dailyTotal);
+        if (dailyTotal > 10000) {
+          monthlyData.highRevenueDays.push({ date: dateStr, revenue: dailyTotal, transactions: report.rows.length });
         }
       }
     }
