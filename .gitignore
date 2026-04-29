@@ -6,6 +6,7 @@ yarn-error.log*
 # Build output - dist/ committed for plugin distribution
 *.js.map
 *.d.ts
+*.d.ts.map
 
 # Environment and secrets
 .env
