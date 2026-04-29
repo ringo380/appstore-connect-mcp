@@ -2,7 +2,7 @@
   "mcpServers": {
     "appstore-connect": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"],
+      "args": ["./dist/index.js"],
       "env": {
         "APP_STORE_KEY_ID": "${APP_STORE_KEY_ID}",
         "APP_STORE_ISSUER_ID": "${APP_STORE_ISSUER_ID}",
