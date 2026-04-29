@@ -7,12 +7,9 @@
  * execute(code) — Agent writes JS to call the authenticated API
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema
-} from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 
 import { JWTManager } from '../auth/jwt-manager.js';
 import { AppStoreClient } from '../api/client.js';
@@ -21,65 +18,29 @@ import { executeInSandbox } from '../executor/sandbox.js';
 import { ServerConfig } from '../types/config.js';
 
 export class AppStoreMCPServer {
-  private server: Server;
+  private server: McpServer;
   private auth: JWTManager;
   private client: AppStoreClient;
   private spec: any;
 
   constructor(config: ServerConfig) {
-    this.server = new Server(
-      {
-        name: 'appstore-connect-mcp',
-        version: '2.0.0'
-      },
-      {
-        capabilities: {
-          tools: {}
-        }
-      }
-    );
+    this.server = new McpServer({
+      name: 'appstore-connect-mcp',
+      version: '2.0.0'
+    });
 
     this.auth = new JWTManager(config.auth);
     this.client = new AppStoreClient(this.auth);
 
-    // Load the OpenAPI spec (923 paths, pre-resolved)
     this.spec = loadSpec();
 
-    this.registerHandlers();
+    this.registerTools();
   }
 
-  private registerHandlers() {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: this.getToolDefinitions()
-    }));
-
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-
-      try {
-        const result = await this.executeTool(name, args || {});
-        return {
-          content: [{
-            type: 'text',
-            text: typeof result === 'string' ? result : JSON.stringify(result, null, 2)
-          }]
-        };
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`
-          }],
-          isError: true
-        };
-      }
-    });
-  }
-
-  private getToolDefinitions(): any[] {
-    return [
+  private registerTools() {
+    this.server.registerTool(
+      'search',
       {
-        name: 'search',
         description: `Write JavaScript to explore the App Store Connect API specification (${this.spec.pathCount} endpoints, ${this.spec.schemaCount} schemas, API v${this.spec.info.version}).
 
 Available globals:
@@ -105,18 +66,21 @@ Example — find all review-related endpoints:
     }));
   return reviews;`,
         inputSchema: {
-          type: 'object',
-          properties: {
-            code: {
-              type: 'string',
-              description: 'JavaScript code to execute. Has access to the `spec` object containing the full App Store Connect OpenAPI specification.'
-            }
-          },
-          required: ['code']
+          code: z.string().describe('JavaScript code to execute. Has access to the `spec` object containing the full App Store Connect OpenAPI specification.')
         }
       },
+      async ({ code }) => {
+        const result = await executeInSandbox(code, { spec: this.spec });
+        const output = result.error
+          ? { error: result.error, logs: result.logs }
+          : { result: result.result, logs: result.logs.length > 0 ? result.logs : undefined };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(output, null, 2) }] };
+      }
+    );
+
+    this.server.registerTool(
+      'execute',
       {
-        name: 'execute',
         description: `Write JavaScript to call the App Store Connect API. Authentication is automatic (JWT injected).
 
 Available globals:
@@ -148,45 +112,10 @@ Example — list apps then get reviews for first app:
     latest: reviews.data[0]?.attributes
   };`,
         inputSchema: {
-          type: 'object',
-          properties: {
-            code: {
-              type: 'string',
-              description: 'JavaScript code to execute. Has access to the authenticated `api` client for App Store Connect.'
-            }
-          },
-          required: ['code']
+          code: z.string().describe('JavaScript code to execute. Has access to the authenticated `api` client for App Store Connect.')
         }
       },
-      {
-        name: 'test_connection',
-        description: 'Test connection to App Store Connect API and show server info',
-        inputSchema: {
-          type: 'object',
-          properties: {}
-        }
-      }
-    ];
-  }
-
-  private async executeTool(name: string, args: any): Promise<any> {
-    switch (name) {
-      case 'search': {
-        if (!args.code) throw new Error('code is required');
-        const result = await executeInSandbox(args.code, { spec: this.spec });
-        if (result.error) {
-          return { error: result.error, logs: result.logs };
-        }
-        return {
-          result: result.result,
-          logs: result.logs.length > 0 ? result.logs : undefined
-        };
-      }
-
-      case 'execute': {
-        if (!args.code) throw new Error('code is required');
-
-        // Create a sandbox-friendly API wrapper
+      async ({ code }) => {
         const api = {
           request: async (opts: { method: string; path: string; params?: any; body?: any }) => {
             return this.client.request(opts.path, opts.params, {
@@ -196,19 +125,23 @@ Example — list apps then get reviews for first app:
           }
         };
 
-        const result = await executeInSandbox(args.code, { api });
-        if (result.error) {
-          return { error: result.error, logs: result.logs };
-        }
-        return {
-          result: result.result,
-          logs: result.logs.length > 0 ? result.logs : undefined
-        };
+        const result = await executeInSandbox(code, { api });
+        const output = result.error
+          ? { error: result.error, logs: result.logs }
+          : { result: result.result, logs: result.logs.length > 0 ? result.logs : undefined };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(output, null, 2) }] };
       }
+    );
 
-      case 'test_connection': {
+    this.server.registerTool(
+      'test_connection',
+      {
+        description: 'Test connection to App Store Connect API and show server info',
+        inputSchema: {}
+      },
+      async () => {
         const connected = await this.client.testConnection();
-        return {
+        const output = {
           connected,
           message: connected ? 'Successfully connected to App Store Connect' : 'Connection failed',
           server: 'appstore-connect-mcp',
@@ -220,11 +153,9 @@ Example — list apps then get reviews for first app:
             schemas: this.spec.schemaCount
           }
         };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(output, null, 2) }] };
       }
-
-      default:
-        throw new Error(`Unknown tool: ${name}. Available: search, execute, test_connection`);
-    }
+    );
   }
 
   async start() {

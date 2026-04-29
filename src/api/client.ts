@@ -50,7 +50,7 @@ export class AppStoreClient {
 
     try {
       // For reports endpoints, we need to handle binary/gzipped responses
-      const isReportEndpoint = endpoint.includes('Reports') || endpoint.includes('reports');
+      const isReportEndpoint = endpoint === '/v1/salesReports' || endpoint === '/v1/financeReports';
       const method = (options?.method || 'GET').toUpperCase();
       const config: AxiosRequestConfig = {
         method,
@@ -72,7 +72,7 @@ export class AppStoreClient {
       if (isReportEndpoint && Buffer.isBuffer(response.data)) {
         const { gunzipSync } = await import('zlib');
         const buf = response.data as unknown as Buffer;
-        if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+        if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b && buf[2] === 0x08) {
           try {
             const decompressed = gunzipSync(buf).toString('utf-8');
             return decompressed as any;
