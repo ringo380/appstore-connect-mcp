@@ -1,0 +1,191 @@
+export class BetaService {
+    client;
+    constructor(client) {
+        this.client = client;
+    }
+    /**
+     * Get all beta testers
+     */
+    async getBetaTesters(limit = 100) {
+        try {
+            const response = await this.client.request('/betaTesters', { limit });
+            if (response.data) {
+                return this.formatBetaTesters(response.data);
+            }
+            return [];
+        }
+        catch (error) {
+            // Return empty array if beta testing is not configured
+            return [];
+        }
+    }
+    /**
+     * Get beta groups for an app
+     */
+    async getBetaGroups(appId) {
+        try {
+            const params = { limit: 100 };
+            if (appId) {
+                params['filter[app]'] = appId;
+            }
+            const response = await this.client.request('/betaGroups', params);
+            if (response.data) {
+                return this.formatBetaGroups(response.data);
+            }
+            return [];
+        }
+        catch (error) {
+            return [];
+        }
+    }
+    /**
+     * Get beta builds for an app
+     */
+    async getBetaBuilds(appId, limit = 10) {
+        try {
+            const params = {
+                'filter[app]': appId,
+                limit,
+                sort: '-uploadedDate'
+            };
+            const response = await this.client.request('/builds', params);
+            if (response.data) {
+                return this.formatBetaBuilds(response.data);
+            }
+            return [];
+        }
+        catch (error) {
+            return [];
+        }
+    }
+    /**
+     * Get TestFlight metrics for an app
+     */
+    async getTestFlightMetrics(appId) {
+        try {
+            // Fetch data in parallel
+            const [testers, groups, builds] = await Promise.all([
+                this.getBetaTesters(200),
+                this.getBetaGroups(appId),
+                appId ? this.getBetaBuilds(appId) : Promise.resolve([])
+            ]);
+            // Calculate metrics
+            const activeTesters = testers.filter(t => t.status === 'ACCEPTED' || t.status === 'INSTALLED').length;
+            const pendingInvitations = testers.filter(t => t.status === 'INVITED' || t.status === 'PENDING').length;
+            return {
+                totalTesters: testers.length,
+                activeTesters,
+                pendingInvitations,
+                groups,
+                recentBuilds: builds.slice(0, 5), // Last 5 builds
+                topCrashes: [], // Would need crash reporting API
+                feedback: [] // Would need feedback API
+            };
+        }
+        catch (error) {
+            throw new Error(`Failed to fetch TestFlight metrics: ${error.message}`);
+        }
+    }
+    /**
+     * Get beta app clip invocations
+     */
+    async getBetaAppClipInvocations(appId) {
+        try {
+            const response = await this.client.request('/betaAppClipInvocations', {
+                'filter[betaAppClipInvocationLocalizations.betaAppClipInvocation]': appId,
+                limit: 100
+            });
+            return response.data || [];
+        }
+        catch (error) {
+            return [];
+        }
+    }
+    /**
+     * Get beta tester metrics
+     */
+    async getTesterMetrics(testerId) {
+        try {
+            const response = await this.client.request(`/betaTesters/${testerId}/metrics`);
+            return response.data || {};
+        }
+        catch (error) {
+            return {
+                testerId,
+                crashCount: 0,
+                sessionCount: 0,
+                feedbackCount: 0
+            };
+        }
+    }
+    /**
+     * Format beta testers data
+     */
+    formatBetaTesters(rawData) {
+        return rawData.map(tester => ({
+            id: tester.id,
+            email: tester.attributes?.email || 'unknown',
+            firstName: tester.attributes?.firstName,
+            lastName: tester.attributes?.lastName,
+            inviteDate: tester.attributes?.inviteDate,
+            status: tester.attributes?.state || 'UNKNOWN',
+            apps: tester.relationships?.apps?.data?.map((a) => a.id) || []
+        }));
+    }
+    /**
+     * Format beta groups data
+     */
+    formatBetaGroups(rawData) {
+        return rawData.map(group => ({
+            id: group.id,
+            name: group.attributes?.name || 'Unnamed Group',
+            isPublicLink: group.attributes?.isInternalGroup === false,
+            publicLinkEnabled: group.attributes?.publicLinkEnabled,
+            publicLink: group.attributes?.publicLink,
+            testerCount: group.relationships?.betaTesters?.meta?.count || 0,
+            createdDate: group.attributes?.createdDate || new Date().toISOString(),
+            appId: group.relationships?.app?.data?.id || ''
+        }));
+    }
+    /**
+     * Format beta builds data
+     */
+    formatBetaBuilds(rawData) {
+        return rawData.map(build => ({
+            id: build.id,
+            version: build.attributes?.version || '',
+            buildNumber: build.attributes?.buildNumber || '',
+            uploadedDate: build.attributes?.uploadedDate || '',
+            processingState: build.attributes?.processingState || 'PROCESSING',
+            expirationDate: build.attributes?.expirationDate,
+            minOsVersion: build.attributes?.minOsVersion,
+            usesNonExemptEncryption: build.attributes?.usesNonExemptEncryption
+        }));
+    }
+    /**
+     * Get comprehensive TestFlight summary
+     */
+    async getTestFlightSummary(appId) {
+        const metrics = await this.getTestFlightMetrics(appId);
+        return {
+            summary: 'TestFlight Beta Testing Summary',
+            metrics: {
+                totalTesters: metrics.totalTesters,
+                activeTesters: metrics.activeTesters,
+                pendingInvitations: metrics.pendingInvitations,
+                adoptionRate: metrics.totalTesters > 0
+                    ? Math.round((metrics.activeTesters / metrics.totalTesters) * 100)
+                    : 0
+            },
+            groups: metrics.groups.map(g => ({
+                name: g.name,
+                testers: g.testerCount,
+                publicLink: g.publicLink || 'Not available'
+            })),
+            latestBuild: metrics.recentBuilds[0] || null,
+            recentBuilds: metrics.recentBuilds.length,
+            timestamp: new Date().toISOString()
+        };
+    }
+}
+//# sourceMappingURL=beta-service.js.map

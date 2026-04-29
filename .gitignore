@@ -3,12 +3,9 @@ node_modules/
 npm-debug.log*
 yarn-error.log*
 
-# Build output
-dist/
-*.js
+# Build output - dist/ committed for plugin distribution
 *.js.map
 *.d.ts
-!src/**/*.ts
 
 # Environment and secrets
 .env

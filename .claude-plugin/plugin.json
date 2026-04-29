@@ -1,0 +1,12 @@
+{
+  "name": "appstore-connect-mcp",
+  "version": "2.0.0",
+  "description": "App Store Connect MCP server — query 923 API endpoints and run authenticated calls via search + execute tools",
+  "author": {
+    "name": "Ryan Robson and Robworks Software LLC"
+  },
+  "homepage": "https://github.com/ringo380/appstore-connect-mcp",
+  "repository": "https://github.com/ringo380/appstore-connect-mcp",
+  "license": "MIT",
+  "keywords": ["app-store-connect", "mcp", "apple", "ios", "appstore", "testflight"]
+}
