@@ -9,6 +9,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { homedir } from 'os';
 import { JWTManager } from '../auth/jwt-manager.js';
 import { AppStoreClient } from '../api/client.js';
 import { loadSpec } from '../spec/loader.js';
@@ -43,6 +45,7 @@ export class AppStoreMCPServer {
         }
         this.spec = loadSpec();
         this.registerTools();
+        this.registerConfigureTool();
     }
     registerTools() {
         this.server.registerTool('search', {
@@ -154,6 +157,50 @@ Example — list apps then get reviews for first app:
                 }
             };
             return { content: [{ type: 'text', text: JSON.stringify(output, null, 2) }] };
+        });
+    }
+    registerConfigureTool() {
+        this.server.registerTool('configure', {
+            description: `Set up App Store Connect API credentials. Writes the required environment variables to ~/.zshenv so they persist across sessions.
+
+You need three things from App Store Connect → Users and Access → Integrations → API Keys:
+1. Key ID — 10-character string (e.g. A1B2C3D4E5)
+2. Issuer ID — UUID shown at the top of the API Keys page
+3. P8 file path — full path to your downloaded .p8 private key file
+
+Optionally provide your Vendor Number (from Payments and Financial Reports) for sales/financial reports.`,
+            inputSchema: {
+                keyId: z.string().describe('10-character Key ID from App Store Connect → Users and Access → Integrations → API Keys'),
+                issuerId: z.string().describe('Issuer ID UUID from the same page'),
+                p8Path: z.string().describe('Absolute path to your .p8 private key file (e.g. /Users/you/.private_keys/AuthKey_XXXXXXXX.p8)'),
+                vendorNumber: z.string().optional().describe('Vendor number for sales/financial reports (optional — from Payments and Financial Reports)')
+            }
+        }, async ({ keyId, issuerId, p8Path, vendorNumber }) => {
+            const expandedPath = p8Path.replace(/^~/, homedir());
+            if (!existsSync(expandedPath)) {
+                return { content: [{ type: 'text', text: `Error: P8 file not found at ${expandedPath}\n\nDouble-check the path and try again. The file is only downloadable once from App Store Connect.` }] };
+            }
+            const zshenvPath = `${homedir()}/.zshenv`;
+            let content = existsSync(zshenvPath) ? readFileSync(zshenvPath, 'utf8') : '';
+            const vars = {
+                APP_STORE_KEY_ID: keyId,
+                APP_STORE_ISSUER_ID: issuerId,
+                APP_STORE_P8_PATH: expandedPath,
+                ...(vendorNumber ? { APP_STORE_VENDOR_NUMBER: vendorNumber } : {})
+            };
+            for (const [key, value] of Object.entries(vars)) {
+                const regex = new RegExp(`^export ${key}=.*$`, 'm');
+                const line = `export ${key}="${value}"`;
+                if (regex.test(content)) {
+                    content = content.replace(regex, line);
+                }
+                else {
+                    content = content.trimEnd() + '\n' + line + '\n';
+                }
+            }
+            writeFileSync(zshenvPath, content, 'utf8');
+            const saved = Object.keys(vars).map(k => `  ${k}`).join('\n');
+            return { content: [{ type: 'text', text: `Credentials saved to ~/.zshenv:\n${saved}\n\nTo activate: reconnect this MCP server via /mcp in Claude Code, then call test_connection to verify.` }] };
         });
     }
     async start() {
