@@ -2,7 +2,7 @@ import { gunzipSync } from 'zlib';
 
 export function decompressIfNeeded(data: any): string {
   if (Buffer.isBuffer(data)) {
-    if (data.length > 2 && data[0] === 0x1f && data[1] === 0x8b) {
+    if (data.length > 2 && data[0] === 0x1f && data[1] === 0x8b && data[2] === 0x08) {
       try {
         return gunzipSync(data).toString('utf-8');
       } catch {
@@ -12,7 +12,7 @@ export function decompressIfNeeded(data: any): string {
     return data.toString('utf-8');
   }
   if (typeof data === 'string') {
-    if (data.charCodeAt(0) === 0x1f && data.charCodeAt(1) === 0x8b) {
+    if (data.charCodeAt(0) === 0x1f && data.charCodeAt(1) === 0x8b && data.charCodeAt(2) === 0x08) {
       try {
         return gunzipSync(Buffer.from(data, 'binary')).toString('utf-8');
       } catch {

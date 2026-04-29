@@ -49,8 +49,18 @@ export class AnalyticsService {
     }
 
     // Step 3: Find a matching report
+    // Apple report names (e.g. "App Store Engagement") don't match our metricType enum directly;
+    // use a keyword map, falling back to the first report if nothing matches.
+    const metricKeywords: Record<string, string[]> = {
+      USERS: ['user', 'active', 'engagement'],
+      SESSIONS: ['session', 'engagement'],
+      CRASHES: ['crash', 'diagnostic'],
+      RETENTION: ['retention', 'cohort'],
+      ENGAGEMENT: ['engagement', 'user', 'session']
+    };
+    const keywords = metricKeywords[request.metricType] || [request.metricType.toLowerCase()];
     const targetReport = reports.find((r: any) =>
-      r.attributes?.name?.toLowerCase().includes(request.metricType.toLowerCase())
+      keywords.some(kw => r.attributes?.name?.toLowerCase().includes(kw))
     ) || reports[0];
 
     const reportId = targetReport?.id;
@@ -103,13 +113,10 @@ export class AnalyticsService {
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
-      try {
-        const resp = await this.client.request(`/analyticsReportRequests/${requestId}/reports`);
-        const reports = resp?.data || [];
-        if (reports.length > 0) return reports;
-      } catch {
-        // Not ready yet
-      }
+      // Let real errors (401, 403, network) propagate — only an empty list means "not ready yet"
+      const resp = await this.client.request(`/analyticsReportRequests/${requestId}/reports`);
+      const reports = resp?.data || [];
+      if (reports.length > 0) return reports;
       await new Promise(r => setTimeout(r, pollInterval));
     }
     return [];

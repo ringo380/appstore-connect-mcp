@@ -61,8 +61,8 @@ export class AppStoreClient {
     await this.checkRateLimit();
 
     try {
-      // For reports endpoints, we need to handle binary/gzipped responses
-      const isReportEndpoint = endpoint.includes('Reports');
+      // Only salesReports and financeReports return gzipped CSV — analytics/metadata endpoints return JSON
+      const isReportEndpoint = endpoint === '/salesReports' || endpoint === '/financeReports';
       const config: AxiosRequestConfig = {
         params,
         ...options

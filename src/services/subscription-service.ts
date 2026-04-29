@@ -26,9 +26,9 @@ export class SubscriptionService {
 
     // Try subscription report types in order
     const subscriptionParams = [
-      { reportType: 'SUBSCRIPTION', reportSubType: 'SUMMARY', version: '1_2' },
-      { reportType: 'SUBSCRIPTION', reportSubType: 'DETAILED', version: '1_2' },
-      { reportType: 'SUBSCRIPTION_EVENT', reportSubType: 'SUMMARY', version: '1_2' },
+      { reportType: 'SUBSCRIPTION', reportSubType: 'SUMMARY', version: '1_3' },
+      { reportType: 'SUBSCRIPTION', reportSubType: 'DETAILED', version: '1_3' },
+      { reportType: 'SUBSCRIPTION_EVENT', reportSubType: 'SUMMARY', version: '1_3' },
       { reportType: 'SUBSCRIBER', reportSubType: 'DETAILED', version: '1_3' }
     ];
 

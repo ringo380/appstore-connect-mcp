@@ -1,5 +1,5 @@
 import { AppStoreClient } from '../api/client.js';
-import { gunzipSync } from 'zlib';
+import { decompressIfNeeded, parseCSVReport } from '../utils/report-utils.js';
 
 export interface FinanceReportRequest {
   vendorNumber: string;
@@ -58,8 +58,8 @@ export class FinanceService {
     const response = await this.client.request('/salesReports', params);
     
     // Apple returns gzipped CSV data, need to decompress
-    const decompressed = this.decompressIfNeeded(response);
-    return this.parseCSVReport(decompressed, options.reportType || 'SALES');
+    const decompressed = decompressIfNeeded(response);
+    return parseCSVReport(decompressed, options.reportType || 'SALES');
   }
 
   /**
@@ -82,8 +82,8 @@ export class FinanceService {
     const response = await this.client.request('/financeReports', params);
     
     // Decompress and parse the financial report
-    const decompressed = this.decompressIfNeeded(response);
-    return this.parseCSVReport(decompressed, 'FINANCIAL');
+    const decompressed = decompressIfNeeded(response);
+    return parseCSVReport(decompressed, 'FINANCIAL');
   }
 
   /**
@@ -169,8 +169,8 @@ export class FinanceService {
         const response = await this.client.request('/salesReports', params);
         
         // If we get here, request succeeded
-        const decompressed = this.decompressIfNeeded(response);
-        const parsedData = this.parseCSVReport(decompressed, 'SUBSCRIPTION');
+        const decompressed = decompressIfNeeded(response);
+        const parsedData = parseCSVReport(decompressed, 'SUBSCRIPTION');
         
         // Format for AI consumption
         return this.formatSubscriptionData(parsedData);
@@ -182,186 +182,6 @@ export class FinanceService {
     
     // If all parameter sets failed, throw the last error
     throw lastError || new Error('Failed to fetch subscription metrics');
-  }
-
-  /**
-   * Detect if response is gzipped and decompress if needed
-   */
-  private decompressIfNeeded(data: any): string {
-    // Handle Buffer (from arraybuffer response)
-    if (Buffer.isBuffer(data)) {
-      // Check for gzip magic bytes
-      if (data.length > 2 && data[0] === 0x1f && data[1] === 0x8b) {
-        try {
-          const decompressed = gunzipSync(data);
-          return decompressed.toString('utf-8');
-        } catch (error) {
-          // If decompression fails, return as string
-          return data.toString('utf-8');
-        }
-      }
-      // Not gzipped, convert to string
-      return data.toString('utf-8');
-    }
-    
-    // Handle string data (legacy path)
-    if (typeof data === 'string') {
-      // Check for gzip magic bytes in string
-      const firstChar = data.charCodeAt(0);
-      const secondChar = data.charCodeAt(1);
-      
-      if (firstChar === 0x1f && secondChar === 0x8b) {
-        try {
-          const buffer = Buffer.from(data, 'binary');
-          const decompressed = gunzipSync(buffer);
-          return decompressed.toString('utf-8');
-        } catch (error) {
-          return data;
-        }
-      }
-      return data;
-    }
-    
-    // Return JSON stringified for other types
-    return JSON.stringify(data);
-  }
-
-  /**
-   * Parse CSV report data
-   */
-  private parseCSVReport(csvData: string, reportType: string): any {
-    if (!csvData || csvData.length === 0) {
-      return { rows: [], summary: 'No data available' };
-    }
-
-    // Split CSV into lines
-    const lines = csvData.split('\n').filter(line => line.trim());
-    
-    if (lines.length === 0) {
-      return { rows: [], summary: 'Empty report' };
-    }
-
-    // Parse header
-    const headers = lines[0].split('\t').map(h => h.trim());
-    
-    // Parse data rows
-    const rows = [];
-    for (let i = 1; i < lines.length; i++) {
-      const values = lines[i].split('\t');
-      const row: any = {};
-      
-      headers.forEach((header, index) => {
-        row[header] = values[index] ? values[index].trim() : '';
-      });
-      
-      rows.push(row);
-    }
-
-    // Add currency info to rows if available
-    const enhancedRows = rows.map(row => {
-      const customerCurrency = row['Customer Currency'] || 'USD';
-      const proceedsRaw = parseFloat(row['Developer Proceeds'] || row['Proceeds'] || '0');
-      const customerPrice = parseFloat(row['Customer Price'] || '0');
-      
-      // CRITICAL FIX: Developer Proceeds currency varies by region!
-      // For certain currencies (IDR, VND, TZS), Developer Proceeds is in local currency
-      // For others (USD, EUR, etc), it may already be converted
-      // We need to check the magnitude to determine if conversion is needed
-      
-      let proceedsUSD = proceedsRaw;
-      
-      // High-value currency detection: If proceeds value is suspiciously high for the currency,
-      // it's likely in local currency and needs conversion
-      const highValueCurrencies = ['IDR', 'VND', 'TZS', 'KRW', 'CLP', 'COP'];
-      
-      if (highValueCurrencies.includes(customerCurrency)) {
-        // These currencies have very high exchange rates
-        // If proceeds > 1000, it's likely in local currency
-        if (proceedsRaw > 1000) {
-          proceedsUSD = this.convertToUSD(proceedsRaw, customerCurrency);
-        }
-      } else if (customerCurrency !== 'USD') {
-        // For other non-USD currencies, check if the value seems reasonable
-        // If proceeds is much higher than customer price, it might need conversion
-        if (proceedsRaw > customerPrice * 2) {
-          // Likely already in USD, no conversion needed
-          proceedsUSD = proceedsRaw;
-        } else {
-          // Might be in local currency, convert it
-          proceedsUSD = this.convertToUSD(proceedsRaw, customerCurrency);
-        }
-      }
-      
-      return {
-        ...row,
-        _customerCurrency: customerCurrency,
-        _customerPrice: customerPrice,
-        _proceedsRaw: proceedsRaw,
-        _proceedsUSD: proceedsUSD
-      };
-    });
-    
-    return {
-      reportType,
-      headers,
-      rows: enhancedRows,
-      rowCount: rows.length,
-      summary: `Parsed ${rows.length} rows from ${reportType} report`
-    };
-  }
-
-  /**
-   * Currency conversion rates (approximate)
-   */
-  private readonly currencyRates: Record<string, number> = {
-    USD: 1,
-    EUR: 1.1,
-    GBP: 1.27,
-    CAD: 0.74,
-    AUD: 0.65,
-    MXN: 0.059,
-    BRL: 0.20,
-    IDR: 0.000065,  // Indonesian Rupiah
-    INR: 0.012,     // Indian Rupee
-    JPY: 0.0067,    // Japanese Yen
-    KRW: 0.00075,   // Korean Won
-    CNY: 0.14,      // Chinese Yuan
-    THB: 0.028,     // Thai Baht
-    PHP: 0.018,     // Philippine Peso
-    VND: 0.000041,  // Vietnamese Dong
-    MYR: 0.21,      // Malaysian Ringgit
-    SGD: 0.74,      // Singapore Dollar
-    HKD: 0.13,      // Hong Kong Dollar
-    TWD: 0.031,     // Taiwan Dollar
-    NZD: 0.61,      // New Zealand Dollar
-    CHF: 1.13,      // Swiss Franc
-    SEK: 0.095,     // Swedish Krona
-    NOK: 0.093,     // Norwegian Krone
-    DKK: 0.15,      // Danish Krone
-    PLN: 0.25,      // Polish Zloty
-    RUB: 0.011,     // Russian Ruble
-    TRY: 0.03,      // Turkish Lira
-    TZS: 0.00039,   // Tanzanian Shilling
-    AED: 0.27,      // UAE Dirham
-    SAR: 0.27,      // Saudi Riyal
-    ZAR: 0.053,     // South African Rand
-    ILS: 0.27,      // Israeli Shekel
-    EGP: 0.021,     // Egyptian Pound
-    NGN: 0.00065,   // Nigerian Naira
-    KES: 0.0078,    // Kenyan Shilling
-    PEN: 0.27,      // Peruvian Sol
-    COP: 0.00024,   // Colombian Peso
-    CLP: 0.0011,    // Chilean Peso
-    ARS: 0.001,     // Argentine Peso
-    RON: 0.22,      // Romanian Leu (was missing!)
-  };
-
-  /**
-   * Convert amount from currency to USD
-   */
-  private convertToUSD(amount: number, currency: string): number {
-    const rate = this.currencyRates[currency?.toUpperCase()] || 1;
-    return amount * rate;
   }
 
   /**
@@ -498,8 +318,17 @@ export class FinanceService {
           return { dateStr, report };
         })
       );
-      for (const result of batchResults) {
-        dayResults.push(result.status === 'fulfilled' ? result.value : null);
+      for (let j = 0; j < batchResults.length; j++) {
+        const result = batchResults[j];
+        if (result.status === 'fulfilled') {
+          dayResults.push(result.value);
+        } else {
+          const msg: string = result.reason?.message || '';
+          if (!msg.includes('not found') && !msg.includes('404') && !msg.includes('No data')) {
+            process.stderr.write(`[finance-service] fetch error for ${batch[j]}: ${msg}\n`);
+          }
+          dayResults.push(null);
+        }
       }
       // Small pause between batches to avoid bursting the rate limit
       if (i + BATCH_SIZE < dates.length) {

@@ -53,7 +53,12 @@ export class ReviewService {
       }
       
       return [];
-    } catch (error) {
+    } catch (error: any) {
+      // Only fall back on 404 (endpoint moved); re-throw auth/permission errors
+      const msg: string = error?.message || '';
+      if (msg.includes('Authentication') || msg.includes('Permission') || msg.includes('401') || msg.includes('403')) {
+        throw error;
+      }
       // Try alternative endpoint
       const response2 = await this.client.request('/customerReviews', {
         'filter[app]': appId,
