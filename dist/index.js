@@ -21,25 +21,17 @@ async function main() {
     const p8Path = process.env.APP_STORE_P8_PATH;
     const vendorNumber = process.env.APP_STORE_VENDOR_NUMBER;
     const debug = process.env.DEBUG === 'true';
-    // Validate required configuration
-    if (!keyId || !issuerId || !p8Path) {
-        // MCP servers should fail silently or use stderr for errors
-        process.stderr.write('Missing required environment variables: APP_STORE_KEY_ID, APP_STORE_ISSUER_ID, APP_STORE_P8_PATH\n');
-        process.exit(1);
-    }
-    // Build configuration
+    // Build configuration — auth is optional; server starts unconfigured if vars are missing
     const config = {
-        auth: {
-            keyId,
-            issuerId,
-            p8Path
-        },
+        auth: keyId && issuerId && p8Path ? { keyId, issuerId, p8Path } : undefined,
         vendorNumber,
         debug
     };
-    // Debug output to stderr only
-    if (debug) {
-        process.stderr.write(`Debug: keyId=${keyId.substring(0, 4)}***, issuerId=${issuerId.substring(0, 8)}***\n`);
+    if (!config.auth) {
+        process.stderr.write('App Store Connect MCP: credentials not configured. Run /appstore-connect-mcp:setup to get started.\n');
+    }
+    if (debug && config.auth) {
+        process.stderr.write(`Debug: keyId=${config.auth.keyId.substring(0, 4)}***, issuerId=${config.auth.issuerId.substring(0, 8)}***\n`);
     }
     try {
         // Create and start server

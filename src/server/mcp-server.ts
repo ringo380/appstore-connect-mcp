@@ -17,10 +17,21 @@ import { loadSpec } from '../spec/loader.js';
 import { executeInSandbox } from '../executor/sandbox.js';
 import { ServerConfig } from '../types/config.js';
 
+const SETUP_MSG = `App Store Connect credentials are not configured.
+
+Run /appstore-connect-mcp:setup in Claude Code to get started.
+
+Or set these environment variables manually in ~/.zshenv:
+  export APP_STORE_KEY_ID="<your-key-id>"
+  export APP_STORE_ISSUER_ID="<your-issuer-id>"
+  export APP_STORE_P8_PATH="<path-to-your.p8>"
+
+Then reconnect via /mcp.`;
+
 export class AppStoreMCPServer {
   private server: McpServer;
-  private auth: JWTManager;
-  private client: AppStoreClient;
+  private auth: JWTManager | null;
+  private client: AppStoreClient | null;
   private spec: any;
 
   constructor(config: ServerConfig) {
@@ -29,8 +40,13 @@ export class AppStoreMCPServer {
       version: '2.0.0'
     });
 
-    this.auth = new JWTManager(config.auth);
-    this.client = new AppStoreClient(this.auth);
+    if (config.auth) {
+      this.auth = new JWTManager(config.auth);
+      this.client = new AppStoreClient(this.auth);
+    } else {
+      this.auth = null;
+      this.client = null;
+    }
 
     this.spec = loadSpec();
 
@@ -116,9 +132,14 @@ Example — list apps then get reviews for first app:
         }
       },
       async ({ code }) => {
+        if (!this.client) {
+          return { content: [{ type: 'text' as const, text: SETUP_MSG }] };
+        }
+
+        const client = this.client;
         const api = {
           request: async (opts: { method: string; path: string; params?: any; body?: any }) => {
-            return this.client.request(opts.path, opts.params, {
+            return client.request(opts.path, opts.params, {
               method: opts.method,
               data: opts.body
             });
@@ -140,6 +161,10 @@ Example — list apps then get reviews for first app:
         inputSchema: {}
       },
       async () => {
+        if (!this.client) {
+          return { content: [{ type: 'text' as const, text: SETUP_MSG }] };
+        }
+
         const connected = await this.client.testConnection();
         const output = {
           connected,

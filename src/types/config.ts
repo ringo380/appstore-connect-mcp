@@ -5,7 +5,7 @@ export interface AuthConfig {
 }
 
 export interface ServerConfig {
-  auth: AuthConfig;
+  auth?: AuthConfig;
   vendorNumber?: string;
   debug?: boolean;
 }
