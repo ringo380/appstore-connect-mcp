@@ -3,18 +3,20 @@
  *
  * Runs LLM-generated JavaScript in an isolated Node.js vm context.
  * Only injected globals (spec, api) are available — no network, no filesystem, no env vars.
+ *
+ * Note: Node.js vm module does not provide a hard security boundary against determined
+ * attackers (prototype chain escapes are possible). The sandbox is intended to prevent
+ * accidental access to host resources, not adversarial exploitation.
  */
 
 import { createContext, runInNewContext } from 'vm';
+import { MAX_OUTPUT_CHARS, SANDBOX_TIMEOUT_MS } from '../constants.js';
 
 export interface ExecuteResult {
-  result: any;
+  result: string | null;
   logs: string[];
   error?: string;
 }
-
-const MAX_OUTPUT_CHARS = 40_000;
-const DEFAULT_TIMEOUT_MS = 15_000;
 
 /**
  * Execute code in a sandboxed vm context.
@@ -25,18 +27,18 @@ const DEFAULT_TIMEOUT_MS = 15_000;
  */
 export async function executeInSandbox(
   code: string,
-  globals: Record<string, any>,
-  timeout: number = DEFAULT_TIMEOUT_MS
+  globals: Record<string, unknown>,
+  timeout: number = SANDBOX_TIMEOUT_MS
 ): Promise<ExecuteResult> {
   const logs: string[] = [];
 
   // Build sandbox context — only injected globals + safe console
-  const contextGlobals: Record<string, any> = {
+  const contextGlobals: Record<string, unknown> = {
     ...globals,
     console: {
-      log: (...args: any[]) => logs.push(args.map(formatValue).join(' ')),
-      error: (...args: any[]) => logs.push('[ERROR] ' + args.map(formatValue).join(' ')),
-      warn: (...args: any[]) => logs.push('[WARN] ' + args.map(formatValue).join(' ')),
+      log: (...args: unknown[]) => logs.push(args.map(formatValue).join(' ')),
+      error: (...args: unknown[]) => logs.push('[ERROR] ' + args.map(formatValue).join(' ')),
+      warn: (...args: unknown[]) => logs.push('[WARN] ' + args.map(formatValue).join(' ')),
     },
     JSON,
     Object,
@@ -88,11 +90,11 @@ export async function executeInSandbox(
       result: truncate(formatValue(result)),
       logs: logs.map(l => truncate(l)),
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     return {
       result: null,
       logs: logs.map(l => truncate(l)),
-      error: error.message || String(error),
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 }
@@ -100,7 +102,7 @@ export async function executeInSandbox(
 /**
  * Format a value for output (handles objects, arrays, etc.)
  */
-function formatValue(value: any): string {
+function formatValue(value: unknown): string {
   if (value === undefined) return 'undefined';
   if (value === null) return 'null';
   if (typeof value === 'string') return value;

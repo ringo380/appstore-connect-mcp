@@ -96,7 +96,7 @@ export interface AnalyticsReport {
   date: string;
   name: string;
   category: string;
-  data: any; // Varies by report type
+  data: Record<string, unknown> | unknown[]; // Varies by report type
 }
 
 // Beta Tester types
