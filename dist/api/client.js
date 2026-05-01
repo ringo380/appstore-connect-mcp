@@ -129,6 +129,15 @@ export class AppStoreClient {
             else if (rawData && typeof rawData === 'object') {
                 data = rawData;
             }
+            else if (typeof rawData === 'string' && rawData.length > 0) {
+                // Apple proxies and CDNs can return plain-text or HTML error bodies
+                try {
+                    data = JSON.parse(rawData);
+                }
+                catch {
+                    process.stderr.write(`[warn] non-JSON error body (${status}): ${rawData.slice(0, 200)}\n`);
+                }
+            }
             const asAppStoreError = data;
             if (asAppStoreError.errors && Array.isArray(asAppStoreError.errors)) {
                 const firstError = asAppStoreError.errors[0];
@@ -139,10 +148,8 @@ export class AppStoreClient {
                     case 403:
                         throw new Error(`Permission denied: ${message}. Check your API key permissions.`);
                     case 404:
-                        if (process.env.DEBUG) {
-                            process.stderr.write(`[debug] 404 - URL: ${error.request?.path || error.config?.url}\n`);
-                            process.stderr.write(`[debug] 404 - Params: ${JSON.stringify(error.config?.params)}\n`);
-                        }
+                        process.stderr.write(`[debug] 404 - URL: ${error.request?.path || error.config?.url}\n`);
+                        process.stderr.write(`[debug] 404 - Params: ${JSON.stringify(error.config?.params)}\n`);
                         throw new Error(`Resource not found: ${message}`);
                     case 429: {
                         const retryAfter = error.response.headers['retry-after'];

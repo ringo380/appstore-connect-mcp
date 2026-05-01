@@ -208,7 +208,10 @@ Optionally provide your Vendor Number (from Payments and Financial Reports) for 
         }
       },
       async ({ keyId, issuerId, p8Path, vendorNumber }) => {
-        const expandedPath = resolve(p8Path.replace(/^~/, homedir()));
+        // Only expand ~ — leave absolute paths untouched, reject relative paths early
+        const expandedPath = p8Path.startsWith('~')
+          ? resolve(p8Path.replace(/^~/, homedir()))
+          : p8Path;
 
         if (!existsSync(expandedPath)) {
           return { content: [{ type: 'text' as const, text: `Error: P8 file not found at ${expandedPath}\n\nDouble-check the path and try again. The file is only downloadable once from App Store Connect.` }] };

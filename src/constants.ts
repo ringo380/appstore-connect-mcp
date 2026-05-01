@@ -1,5 +1,6 @@
 export const JWT_EXPIRY_SECONDS = 1200; // 20 minutes (Apple's limit)
-export const JWT_CACHE_DURATION_MS = 19 * 60 * 1000; // 19 minutes (1 min buffer before expiry)
+// Cache 1 minute shorter than expiry so we never present a stale token
+export const JWT_CACHE_DURATION_MS = JWT_EXPIRY_SECONDS * 1000 - 60_000;
 
 export const RATE_LIMIT_PER_HOUR = 3600;
 export const RATE_LIMIT_THRESHOLD = 3500; // 100-request safety buffer
