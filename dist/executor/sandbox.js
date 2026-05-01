@@ -3,10 +3,13 @@
  *
  * Runs LLM-generated JavaScript in an isolated Node.js vm context.
  * Only injected globals (spec, api) are available — no network, no filesystem, no env vars.
+ *
+ * Note: Node.js vm module does not provide a hard security boundary against determined
+ * attackers (prototype chain escapes are possible). The sandbox is intended to prevent
+ * accidental access to host resources, not adversarial exploitation.
  */
 import { createContext, runInNewContext } from 'vm';
-const MAX_OUTPUT_CHARS = 40_000;
-const DEFAULT_TIMEOUT_MS = 15_000;
+import { MAX_OUTPUT_CHARS, SANDBOX_TIMEOUT_MS } from '../constants.js';
 /**
  * Execute code in a sandboxed vm context.
  *
@@ -14,7 +17,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
  * @param globals - Objects available inside the sandbox (e.g., { spec }, { api })
  * @param timeout - Maximum execution time in ms
  */
-export async function executeInSandbox(code, globals, timeout = DEFAULT_TIMEOUT_MS) {
+export async function executeInSandbox(code, globals, timeout = SANDBOX_TIMEOUT_MS) {
     const logs = [];
     // Build sandbox context — only injected globals + safe console
     const contextGlobals = {
@@ -75,7 +78,7 @@ export async function executeInSandbox(code, globals, timeout = DEFAULT_TIMEOUT_
         return {
             result: null,
             logs: logs.map(l => truncate(l)),
-            error: error.message || String(error),
+            error: error instanceof Error ? error.message : String(error),
         };
     }
 }

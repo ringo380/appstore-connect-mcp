@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import { existsSync } from 'fs';
 import jwt from 'jsonwebtoken';
 import { AuthConfig, JWTPayload, CachedToken } from '../types/config.js';
+import { JWT_EXPIRY_SECONDS, JWT_CACHE_DURATION_MS } from '../constants.js';
 
 export class JWTManager {
   private privateKey: string;
@@ -44,10 +45,9 @@ export class JWTManager {
     // Generate new token
     const token = this.generateJWT();
     
-    // Cache it for 19 minutes (1 minute buffer before 20-minute expiry)
     this.tokenCache.set(cacheKey, {
       token,
-      expiry: new Date(Date.now() + 19 * 60 * 1000)
+      expiry: new Date(Date.now() + JWT_CACHE_DURATION_MS)
     });
 
     return token;
@@ -62,7 +62,7 @@ export class JWTManager {
     const payload: JWTPayload = {
       iss: this.issuerId,
       iat: now,
-      exp: now + (20 * 60), // 20 minutes from now
+      exp: now + JWT_EXPIRY_SECONDS,
       aud: 'appstoreconnect-v1'
     };
 

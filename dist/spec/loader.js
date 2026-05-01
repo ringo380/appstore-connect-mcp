@@ -16,7 +16,7 @@ const __dirname = dirname(__filename);
 export function loadSpec() {
     const rawPath = join(__dirname, 'openapi.json');
     const raw = JSON.parse(readFileSync(rawPath, 'utf-8'));
-    const schemas = raw.components?.schemas || {};
+    const schemas = raw.components?.schemas ?? {};
     // Resolve $ref pointers inline (one level deep — sufficient for search)
     const paths = {};
     for (const [path, methods] of Object.entries(raw.paths)) {
@@ -25,26 +25,26 @@ export function loadSpec() {
             if (method === 'parameters')
                 continue; // skip path-level params
             paths[path][method] = {
-                summary: operation.summary || '',
-                description: operation.description || '',
-                operationId: operation.operationId || '',
-                tags: operation.tags || [],
-                parameters: (operation.parameters || []).map((p) => {
+                summary: operation.summary ?? '',
+                description: operation.description ?? '',
+                operationId: operation.operationId ?? '',
+                tags: operation.tags ?? [],
+                parameters: (operation.parameters ?? []).map((p) => {
                     if (p.$ref) {
                         return resolveRef(p.$ref, raw);
                     }
                     return {
                         name: p.name,
                         in: p.in,
-                        required: p.required || false,
-                        description: p.description || '',
+                        required: p.required ?? false,
+                        description: p.description ?? '',
                         schema: resolveSchemaShallow(p.schema, schemas)
                     };
                 }),
                 requestBody: operation.requestBody
                     ? summarizeRequestBody(operation.requestBody, schemas)
                     : undefined,
-                responses: summarizeResponses(operation.responses || {}, schemas)
+                responses: summarizeResponses(operation.responses ?? {}, schemas)
             };
         }
     }
@@ -56,14 +56,18 @@ export function loadSpec() {
     };
 }
 /**
- * Resolve a $ref pointer to its target
+ * Resolve a $ref pointer to its target in the spec.
+ * Returns the referenced node, or a sentinel object if the ref is unresolvable.
  */
 function resolveRef(ref, root) {
     const parts = ref.replace('#/', '').split('/');
     let current = root;
     for (const part of parts) {
-        current = current?.[part];
-        if (!current)
+        if (current === null || typeof current !== 'object') {
+            return { $ref: ref, _unresolved: true };
+        }
+        current = current[part];
+        if (current === undefined)
             return { $ref: ref, _unresolved: true };
     }
     return current;
@@ -76,15 +80,17 @@ function resolveSchemaShallow(schema, schemas) {
         return undefined;
     if (schema.$ref) {
         const name = schema.$ref.split('/').pop();
+        if (!name)
+            return { type: 'unknown', ref: schema.$ref };
         const resolved = schemas[name];
         if (!resolved)
             return { type: 'unknown', ref: name };
         return {
-            type: resolved.type || 'object',
+            type: resolved.type ?? 'object',
             properties: resolved.properties
                 ? Object.fromEntries(Object.entries(resolved.properties).map(([k, v]) => [
                     k,
-                    { type: v.type || (v.$ref ? 'object' : 'unknown'), description: v.description || '' }
+                    { type: v.type ?? (v.$ref ? 'object' : 'unknown'), description: v.description ?? '' }
                 ]))
                 : undefined,
             enum: resolved.enum,
@@ -105,9 +111,9 @@ function resolveSchemaShallow(schema, schemas) {
 function summarizeRequestBody(body, schemas) {
     const content = body.content?.['application/json'];
     if (!content?.schema)
-        return { description: body.description || '' };
+        return { description: body.description ?? '' };
     return {
-        required: body.required || false,
+        required: body.required ?? false,
         schema: resolveSchemaShallow(content.schema, schemas)
     };
 }
@@ -119,7 +125,7 @@ function summarizeResponses(responses, schemas) {
     for (const [status, resp] of Object.entries(responses)) {
         const content = resp.content?.['application/json'];
         result[status] = {
-            description: resp.description || '',
+            description: resp.description ?? '',
             schema: content?.schema ? resolveSchemaShallow(content.schema, schemas) : undefined
         };
     }

@@ -1,6 +1,15 @@
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { JWTManager } from '../auth/jwt-manager.js';
 import { PagedResponse, AppStoreError } from '../types/api.js';
+import {
+  AXIOS_TIMEOUT_MS,
+  RATE_LIMIT_PER_HOUR,
+  RATE_LIMIT_THRESHOLD,
+  RATE_LIMIT_WINDOW_MS,
+  REPORT_ENDPOINTS,
+} from '../constants.js';
+
+type QueryParams = Record<string, string | number | boolean | undefined>;
 
 export class AppStoreClient {
   private baseURL = 'https://api.appstoreconnect.apple.com';
@@ -11,18 +20,16 @@ export class AppStoreClient {
 
   constructor(auth: JWTManager) {
     this.auth = auth;
-    this.requestResetTime = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
-    
-    // Create axios instance with defaults
+    this.requestResetTime = new Date(Date.now() + RATE_LIMIT_WINDOW_MS);
+
     this.axiosInstance = axios.create({
       baseURL: this.baseURL,
-      timeout: 30000, // 30 second timeout
+      timeout: AXIOS_TIMEOUT_MS,
       headers: {
         'Content-Type': 'application/json'
       }
     });
 
-    // Add request interceptor for auth
     this.axiosInstance.interceptors.request.use(
       async (config) => {
         const token = await this.auth.getToken();
@@ -32,25 +39,20 @@ export class AppStoreClient {
       (error) => Promise.reject(error)
     );
 
-    // Add response interceptor for error handling
     this.axiosInstance.interceptors.response.use(
       (response) => response,
       (error) => this.handleError(error)
     );
-
-    // App Store API Client initialized
   }
 
   /**
    * Make a GET request to the App Store Connect API
    */
-  async request<T = any>(endpoint: string, params?: any, options?: AxiosRequestConfig): Promise<T> {
-    // Check rate limit
+  async request<T = unknown>(endpoint: string, params?: QueryParams, options?: AxiosRequestConfig): Promise<T> {
     await this.checkRateLimit();
 
     try {
-      // For reports endpoints, we need to handle binary/gzipped responses
-      const isReportEndpoint = endpoint === '/v1/salesReports' || endpoint === '/v1/financeReports';
+      const isReportEndpoint = REPORT_ENDPOINTS.has(endpoint);
       const method = (options?.method || 'GET').toUpperCase();
       const config: AxiosRequestConfig = {
         method,
@@ -60,7 +62,6 @@ export class AppStoreClient {
         ...options,
       };
 
-      // Set response type to arraybuffer for report endpoints to handle gzipped data
       if (isReportEndpoint && method === 'GET') {
         config.responseType = 'arraybuffer';
       }
@@ -74,18 +75,16 @@ export class AppStoreClient {
         const buf = response.data as unknown as Buffer;
         if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b && buf[2] === 0x08) {
           try {
-            const decompressed = gunzipSync(buf).toString('utf-8');
-            return decompressed as any;
-          } catch {
-            return buf.toString('utf-8') as any;
+            return gunzipSync(buf).toString('utf-8') as unknown as T;
+          } catch (decompressError: unknown) {
+            process.stderr.write(`[warn] gzip decompression failed, returning raw: ${decompressError instanceof Error ? decompressError.message : String(decompressError)}\n`);
           }
         }
-        return buf.toString('utf-8') as any;
+        return buf.toString('utf-8') as unknown as T;
       }
 
       return response.data;
     } catch (error) {
-      // Error is already handled by interceptor
       throw error;
     }
   }
@@ -93,23 +92,20 @@ export class AppStoreClient {
   /**
    * Handle paginated endpoints with automatic page fetching
    */
-  async *paginate<T>(endpoint: string, params?: any): AsyncGenerator<T, void, unknown> {
+  async *paginate<T>(endpoint: string, params?: QueryParams): AsyncGenerator<T, void, unknown> {
     let nextUrl: string | null = endpoint;
-    let currentParams = params;
+    let currentParams: QueryParams | undefined = params;
 
     while (nextUrl) {
       const response: PagedResponse<T> = await this.request<PagedResponse<T>>(nextUrl, currentParams);
-      
-      // Yield each item
+
       for (const item of response.data) {
         yield item;
       }
 
-      // Check for next page
       if (response.links?.next) {
-        // Extract path from full URL
         nextUrl = response.links.next.replace(this.baseURL, '');
-        currentParams = undefined; // Params are included in next URL
+        currentParams = undefined;
       } else {
         nextUrl = null;
       }
@@ -119,9 +115,9 @@ export class AppStoreClient {
   /**
    * Get all items from a paginated endpoint (use with caution for large datasets)
    */
-  async getAll<T>(endpoint: string, params?: any): Promise<T[]> {
+  async getAll<T>(endpoint: string, params?: QueryParams): Promise<T[]> {
     const items: T[] = [];
-    
+
     for await (const item of this.paginate<T>(endpoint, params)) {
       items.push(item);
     }
@@ -130,24 +126,20 @@ export class AppStoreClient {
   }
 
   /**
-   * Check and enforce rate limiting (3600 requests per hour)
+   * Check and enforce rate limiting
    */
   private async checkRateLimit(): Promise<void> {
-    // Reset counter if hour has passed
     if (new Date() > this.requestResetTime) {
       this.requestCount = 0;
-      this.requestResetTime = new Date(Date.now() + 60 * 60 * 1000);
+      this.requestResetTime = new Date(Date.now() + RATE_LIMIT_WINDOW_MS);
     }
 
-    // Check if we're approaching the limit
-    if (this.requestCount >= 3500) {
-      // Leave 100 request buffer
+    if (this.requestCount >= RATE_LIMIT_THRESHOLD) {
       const waitTime = this.requestResetTime.getTime() - Date.now();
-      
       if (waitTime > 0) {
         await this.sleep(waitTime);
         this.requestCount = 0;
-        this.requestResetTime = new Date(Date.now() + 60 * 60 * 1000);
+        this.requestResetTime = new Date(Date.now() + RATE_LIMIT_WINDOW_MS);
       }
     }
   }
@@ -158,84 +150,78 @@ export class AppStoreClient {
   private async handleError(error: AxiosError): Promise<never> {
     if (error.response) {
       const status = error.response.status;
-      let data = error.response.data as AppStoreError | any;
+      let data: AppStoreError | Record<string, unknown> = {};
 
-      // Decode arraybuffer error responses (report endpoints return ArrayBuffer)
-      if (data instanceof ArrayBuffer || Buffer.isBuffer(data)) {
+      const rawData = error.response.data;
+      if (rawData instanceof ArrayBuffer || Buffer.isBuffer(rawData)) {
         try {
-          data = JSON.parse(Buffer.from(data as ArrayBuffer).toString('utf-8'));
+          data = JSON.parse(Buffer.from(rawData as ArrayBuffer).toString('utf-8')) as AppStoreError;
+        } catch (parseError: unknown) {
+          process.stderr.write(`[warn] failed to parse error response body: ${parseError instanceof Error ? parseError.message : String(parseError)}\n`);
+        }
+      } else if (rawData && typeof rawData === 'object') {
+        data = rawData as AppStoreError;
+      } else if (typeof rawData === 'string' && rawData.length > 0) {
+        // Apple proxies and CDNs can return plain-text or HTML error bodies
+        try {
+          data = JSON.parse(rawData) as AppStoreError;
         } catch {
-          data = {};
+          process.stderr.write(`[warn] non-JSON error body (${status}): ${rawData.slice(0, 200)}\n`);
         }
       }
 
-      // Check if it's an App Store error response
-      if (data?.errors && Array.isArray(data.errors)) {
-        const firstError = data.errors[0];
+      const asAppStoreError = data as AppStoreError;
+      if (asAppStoreError.errors && Array.isArray(asAppStoreError.errors)) {
+        const firstError = asAppStoreError.errors[0];
         const message = firstError.detail || firstError.title || 'Unknown error';
-        
-        // Special handling for common errors
+
         switch (status) {
           case 401:
             throw new Error(`Authentication failed: ${message}. Check your credentials.`);
           case 403:
             throw new Error(`Permission denied: ${message}. Check your API key permissions.`);
           case 404:
-            // Log more details for debugging  
-            process.stderr.write(`404 Debug - URL: ${error.request?.path || error.config?.url}\n`);
-            process.stderr.write(`404 Debug - Params: ${JSON.stringify(error.config?.params)}\n`);
+            process.stderr.write(`[debug] 404 - URL: ${error.request?.path || error.config?.url}\n`);
+            process.stderr.write(`[debug] 404 - Params: ${JSON.stringify(error.config?.params)}\n`);
             throw new Error(`Resource not found: ${message}`);
-          case 429:
-            // Rate limited - wait and retry
+          case 429: {
             const retryAfter = error.response.headers['retry-after'];
             const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : 60000;
             await this.sleep(waitTime);
             throw new Error('Rate limited - please retry');
+          }
           default:
             throw new Error(`API Error (${status}): ${message}`);
         }
       } else {
-        // Generic error response
         throw new Error(`API Error (${status}): ${error.message}`);
       }
     } else if (error.request) {
-      // Request made but no response
       throw new Error(`Network error: No response from App Store Connect API`);
     } else {
-      // Something else happened
       throw new Error(`Request error: ${error.message}`);
     }
   }
 
-  /**
-   * Helper function to sleep for specified milliseconds
-   */
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  /**
-   * Test the connection to App Store Connect
-   */
   async testConnection(): Promise<boolean> {
     try {
-      // Try to fetch apps (simplest endpoint)
       await this.request('/v1/apps', { limit: 1 });
       return true;
-    } catch (error) {
+    } catch {
       return false;
     }
   }
 
-  /**
-   * Get request statistics
-   */
   getStats() {
     const resetIn = Math.max(0, this.requestResetTime.getTime() - Date.now());
-    
+
     return {
       requestCount: this.requestCount,
-      requestLimit: 3600,
+      requestLimit: RATE_LIMIT_PER_HOUR,
       resetInSeconds: Math.ceil(resetIn / 1000),
       resetAt: this.requestResetTime
     };

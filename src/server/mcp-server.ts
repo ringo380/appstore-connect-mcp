@@ -12,6 +12,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
+import { resolve } from 'path';
+import { MAX_CODE_LENGTH } from '../constants.js';
 
 import { JWTManager } from '../auth/jwt-manager.js';
 import { AppStoreClient } from '../api/client.js';
@@ -85,7 +87,7 @@ Example — find all review-related endpoints:
     }));
   return reviews;`,
         inputSchema: {
-          code: z.string().describe('JavaScript code to execute. Has access to the `spec` object containing the full App Store Connect OpenAPI specification.')
+          code: z.string().max(MAX_CODE_LENGTH).describe('JavaScript code to execute. Has access to the `spec` object containing the full App Store Connect OpenAPI specification.')
         }
       },
       async ({ code }) => {
@@ -131,7 +133,7 @@ Example — list apps then get reviews for first app:
     latest: reviews.data[0]?.attributes
   };`,
         inputSchema: {
-          code: z.string().describe('JavaScript code to execute. Has access to the authenticated `api` client for App Store Connect.')
+          code: z.string().max(MAX_CODE_LENGTH).describe('JavaScript code to execute. Has access to the authenticated `api` client for App Store Connect.')
         }
       },
       async ({ code }) => {
@@ -206,7 +208,10 @@ Optionally provide your Vendor Number (from Payments and Financial Reports) for 
         }
       },
       async ({ keyId, issuerId, p8Path, vendorNumber }) => {
-        const expandedPath = p8Path.replace(/^~/, homedir());
+        // Only expand ~ — leave absolute paths untouched, reject relative paths early
+        const expandedPath = p8Path.startsWith('~')
+          ? resolve(p8Path.replace(/^~/, homedir()))
+          : p8Path;
 
         if (!existsSync(expandedPath)) {
           return { content: [{ type: 'text' as const, text: `Error: P8 file not found at ${expandedPath}\n\nDouble-check the path and try again. The file is only downloadable once from App Store Connect.` }] };

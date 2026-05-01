@@ -12,9 +12,113 @@ import { dirname, join } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-interface ResolvedSpec {
+// Raw OpenAPI spec shapes (input types — before resolution)
+
+interface RawSchema {
+  $ref?: string;
+  type?: string;
+  properties?: Record<string, RawSchema>;
+  items?: RawSchema;
+  enum?: unknown[];
+  description?: string;
+}
+
+interface RawParameter {
+  $ref?: string;
+  name?: string;
+  in?: string;
+  required?: boolean;
+  description?: string;
+  schema?: RawSchema;
+}
+
+interface RawOperation {
+  summary?: string;
+  description?: string;
+  operationId?: string;
+  tags?: string[];
+  parameters?: RawParameter[];
+  requestBody?: RawRequestBody;
+  responses?: Record<string, RawResponse>;
+}
+
+interface RawRequestBody {
+  required?: boolean;
+  description?: string;
+  content?: {
+    'application/json'?: {
+      schema?: RawSchema;
+    };
+  };
+}
+
+interface RawResponse {
+  description?: string;
+  content?: {
+    'application/json'?: {
+      schema?: RawSchema;
+    };
+  };
+}
+
+interface RawSpec {
   info: { title: string; version: string };
-  paths: Record<string, any>;
+  paths: Record<string, Record<string, RawOperation>>;
+  components?: {
+    schemas?: Record<string, RawSchema>;
+  };
+}
+
+// Resolved output shapes (what the sandbox agent sees)
+
+interface ResolvedProperty {
+  type: string;
+  description: string;
+}
+
+interface ResolvedSchema {
+  type?: string;
+  properties?: Record<string, ResolvedProperty>;
+  items?: ResolvedSchema;
+  enum?: unknown[];
+  description?: string;
+  ref?: string;
+}
+
+interface ResolvedParameter {
+  name?: string;
+  in?: string;
+  required?: boolean;
+  description?: string;
+  schema?: ResolvedSchema;
+  $ref?: string;
+  _unresolved?: boolean;
+}
+
+interface ResolvedRequestBody {
+  required?: boolean;
+  description?: string;
+  schema?: ResolvedSchema;
+}
+
+interface ResolvedResponse {
+  description: string;
+  schema?: ResolvedSchema;
+}
+
+interface ResolvedOperation {
+  summary: string;
+  description: string;
+  operationId: string;
+  tags: string[];
+  parameters: ResolvedParameter[];
+  requestBody?: ResolvedRequestBody;
+  responses: Record<string, ResolvedResponse>;
+}
+
+export interface ResolvedSpec {
+  info: { title: string; version: string };
+  paths: Record<string, Record<string, ResolvedOperation>>;
   pathCount: number;
   schemaCount: number;
 }
@@ -25,39 +129,39 @@ interface ResolvedSpec {
  */
 export function loadSpec(): ResolvedSpec {
   const rawPath = join(__dirname, 'openapi.json');
-  const raw = JSON.parse(readFileSync(rawPath, 'utf-8'));
+  const raw = JSON.parse(readFileSync(rawPath, 'utf-8')) as RawSpec;
 
-  const schemas = raw.components?.schemas || {};
+  const schemas = raw.components?.schemas ?? {};
 
   // Resolve $ref pointers inline (one level deep — sufficient for search)
-  const paths: Record<string, any> = {};
+  const paths: Record<string, Record<string, ResolvedOperation>> = {};
 
-  for (const [path, methods] of Object.entries(raw.paths as Record<string, any>)) {
+  for (const [path, methods] of Object.entries(raw.paths)) {
     paths[path] = {};
-    for (const [method, operation] of Object.entries(methods as Record<string, any>)) {
+    for (const [method, operation] of Object.entries(methods)) {
       if (method === 'parameters') continue; // skip path-level params
 
       paths[path][method] = {
-        summary: operation.summary || '',
-        description: operation.description || '',
-        operationId: operation.operationId || '',
-        tags: operation.tags || [],
-        parameters: (operation.parameters || []).map((p: any) => {
+        summary: operation.summary ?? '',
+        description: operation.description ?? '',
+        operationId: operation.operationId ?? '',
+        tags: operation.tags ?? [],
+        parameters: (operation.parameters ?? []).map((p) => {
           if (p.$ref) {
-            return resolveRef(p.$ref, raw);
+            return resolveRef(p.$ref, raw) as ResolvedParameter;
           }
           return {
             name: p.name,
             in: p.in,
-            required: p.required || false,
-            description: p.description || '',
+            required: p.required ?? false,
+            description: p.description ?? '',
             schema: resolveSchemaShallow(p.schema, schemas)
           };
         }),
         requestBody: operation.requestBody
           ? summarizeRequestBody(operation.requestBody, schemas)
           : undefined,
-        responses: summarizeResponses(operation.responses || {}, schemas)
+        responses: summarizeResponses(operation.responses ?? {}, schemas)
       };
     }
   }
@@ -71,14 +175,18 @@ export function loadSpec(): ResolvedSpec {
 }
 
 /**
- * Resolve a $ref pointer to its target
+ * Resolve a $ref pointer to its target in the spec.
+ * Returns the referenced node, or a sentinel object if the ref is unresolvable.
  */
-function resolveRef(ref: string, root: any): any {
+function resolveRef(ref: string, root: RawSpec): unknown {
   const parts = ref.replace('#/', '').split('/');
-  let current = root;
+  let current: unknown = root;
   for (const part of parts) {
-    current = current?.[part];
-    if (!current) return { $ref: ref, _unresolved: true };
+    if (current === null || typeof current !== 'object') {
+      return { $ref: ref, _unresolved: true };
+    }
+    current = (current as Record<string, unknown>)[part];
+    if (current === undefined) return { $ref: ref, _unresolved: true };
   }
   return current;
 }
@@ -86,20 +194,24 @@ function resolveRef(ref: string, root: any): any {
 /**
  * Resolve schema one level deep (type + properties, not full tree)
  */
-function resolveSchemaShallow(schema: any, schemas: Record<string, any>): any {
+function resolveSchemaShallow(
+  schema: RawSchema | undefined,
+  schemas: Record<string, RawSchema>
+): ResolvedSchema | undefined {
   if (!schema) return undefined;
 
   if (schema.$ref) {
     const name = schema.$ref.split('/').pop();
-    const resolved = schemas[name!];
+    if (!name) return { type: 'unknown', ref: schema.$ref };
+    const resolved = schemas[name];
     if (!resolved) return { type: 'unknown', ref: name };
     return {
-      type: resolved.type || 'object',
+      type: resolved.type ?? 'object',
       properties: resolved.properties
         ? Object.fromEntries(
-            Object.entries(resolved.properties).map(([k, v]: [string, any]) => [
+            Object.entries(resolved.properties).map(([k, v]) => [
               k,
-              { type: v.type || (v.$ref ? 'object' : 'unknown'), description: v.description || '' }
+              { type: v.type ?? (v.$ref ? 'object' : 'unknown'), description: v.description ?? '' }
             ])
           )
         : undefined,
@@ -115,18 +227,21 @@ function resolveSchemaShallow(schema: any, schemas: Record<string, any>): any {
     };
   }
 
-  return schema;
+  return schema as ResolvedSchema;
 }
 
 /**
  * Summarize request body (type + required fields, not full schema)
  */
-function summarizeRequestBody(body: any, schemas: Record<string, any>): any {
+function summarizeRequestBody(
+  body: RawRequestBody,
+  schemas: Record<string, RawSchema>
+): ResolvedRequestBody {
   const content = body.content?.['application/json'];
-  if (!content?.schema) return { description: body.description || '' };
+  if (!content?.schema) return { description: body.description ?? '' };
 
   return {
-    required: body.required || false,
+    required: body.required ?? false,
     schema: resolveSchemaShallow(content.schema, schemas)
   };
 }
@@ -134,12 +249,15 @@ function summarizeRequestBody(body: any, schemas: Record<string, any>): any {
 /**
  * Summarize responses (status codes + descriptions, not full schemas)
  */
-function summarizeResponses(responses: Record<string, any>, schemas: Record<string, any>): any {
-  const result: Record<string, any> = {};
+function summarizeResponses(
+  responses: Record<string, RawResponse>,
+  schemas: Record<string, RawSchema>
+): Record<string, ResolvedResponse> {
+  const result: Record<string, ResolvedResponse> = {};
   for (const [status, resp] of Object.entries(responses)) {
-    const content = (resp as any).content?.['application/json'];
+    const content = resp.content?.['application/json'];
     result[status] = {
-      description: (resp as any).description || '',
+      description: resp.description ?? '',
       schema: content?.schema ? resolveSchemaShallow(content.schema, schemas) : undefined
     };
   }
